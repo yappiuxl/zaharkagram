@@ -4,20 +4,43 @@ import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+import nodemailer from 'nodemailer';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
 
-const users = new Map();       // userId -> { id, email, username, name, bio, color, passHash, salt }
+// ---------- SMTP (опционально) ----------
+let transporter = null;
+if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+  transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 465),
+    secure: Number(process.env.SMTP_PORT || 465) === 465,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+  });
+  console.log('SMTP configured:', process.env.SMTP_HOST);
+} else {
+  console.log('SMTP not configured — коды будут в логах сервера');
+}
+
+// ---------- хранилище ----------
+const users = new Map();       // userId -> { id, email, username, name, bio, color }
 const sessions = new Map();    // token -> userId
 const emails = new Map();      // email.toLowerCase() -> userId
 const usernames = new Map();   // username.toLowerCase() -> userId
 const chats = new Map();
 const messages = new Map();
+const otpCodes = new Map();    // email -> { code, expiresAt, attempts }
 
 const GLOBAL_CHAT = 'global';
 chats.set(GLOBAL_CHAT, { id: GLOBAL_CHAT, name: 'Общий чат', members: new Set() });
 messages.set(GLOBAL_CHAT, []);
+
+const OTP_TTL_MS = 10 * 60 * 1000; // 10 минут
+const OTP_MAX_ATTEMPTS = 5;
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
@@ -31,10 +54,6 @@ app.use((req, res, next) => {
 });
 
 app.use(express.static(__dirname, { extensions: ['html'] }));
-
-function hashPassword(password, salt) {
-  return crypto.createHash('sha256').update(salt + ':' + password).digest('hex');
-}
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USERNAME_RE = /^[a-zA-Z][a-zA-Z0-9_]{4,31}$/;
@@ -51,57 +70,116 @@ function authMiddleware(req, res, next) {
   next();
 }
 
-// ---------- регистрация по email ----------
-app.post('/api/auth/register', (req, res) => {
-  const { email, password } = req.body || {};
-  if (typeof email !== 'string' || !EMAIL_RE.test(email.trim())) {
-    return res.status(400).json({ error: 'bad email' });
+// ---------- отправить код на email ----------
+app.post('/api/auth/send-code', async (req, res) => {
+  const email = (req.body && req.body.email || '').trim();
+  if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'bad email' });
+
+  const lower = email.toLowerCase();
+
+  // rate limit: не чаще раза в 60 секунд
+  const existing = otpCodes.get(lower);
+  if (existing && existing.createdAt && Date.now() - existing.createdAt < 60_000) {
+    const wait = Math.ceil((60_000 - (Date.now() - existing.createdAt)) / 1000);
+    return res.status(429).json({ error: `Подожди ${wait} сек перед повторной отправкой` });
   }
-  if (typeof password !== 'string' || password.length < 6) {
-    return res.status(400).json({ error: 'short password' });
+
+  const code = String(crypto.randomInt(100000, 1000000)); // 6 цифр
+  otpCodes.set(lower, {
+    code,
+    expiresAt: Date.now() + OTP_TTL_MS,
+    createdAt: Date.now(),
+    attempts: 0,
+  });
+
+  // Всегда логируем в сервер (видно в Render Logs)
+  console.log(`\n[OTP] email=${email} code=${code}\n`);
+
+  // Пытаемся отправить если SMTP настроен
+  if (transporter) {
+    try {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || process.env.SMTP_USER,
+        to: email,
+        subject: 'ЗахаркаГрам — код входа',
+        text: `Твой код входа: ${code}\n\nКод действует 10 минут. Если ты не запрашивал — проигнорируй это письмо.`,
+        html: `
+          <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:24px;background:#17212b;color:#fff;border-radius:12px">
+            <h2 style="color:#5288c1;margin:0 0 16px">ЗахаркаГрам</h2>
+            <p style="font-size:15px;color:#c9d1d9">Твой код входа:</p>
+            <div style="font-size:36px;font-weight:700;letter-spacing:8px;text-align:center;padding:16px;background:#0e1621;border-radius:8px;margin:16px 0;color:#fff">${code}</div>
+            <p style="font-size:13px;color:#708499">Код действует 10 минут. Если ты не запрашивал вход — проигнорируй письмо.</p>
+          </div>
+        `,
+      });
+      console.log(`[OTP] email sent to ${email}`);
+    } catch (e) {
+      console.error('[OTP] smtp error:', e.message);
+      return res.status(500).json({ error: 'Не удалось отправить письмо. Проверь настройки SMTP на сервере.' });
+    }
   }
 
-  const lowerEmail = email.trim().toLowerCase();
-  if (emails.has(lowerEmail)) return res.status(409).json({ error: 'email taken' });
-
-  const salt = crypto.randomBytes(16).toString('hex');
-  const userId = 'u_' + crypto.randomBytes(8).toString('hex');
-  const user = {
-    id: userId,
-    email: email.trim(),
-    username: null,
-    name: null,
-    bio: '',
-    color: '#5288c1',
-    salt,
-    passHash: hashPassword(password, salt),
-  };
-
-  users.set(userId, user);
-  emails.set(lowerEmail, userId);
-
-  const token = crypto.randomBytes(24).toString('hex');
-  sessions.set(token, userId);
-  res.json({ token, user: publicUser(user), isNewUser: true });
+  res.json({ ok: true, needsCode: true });
 });
 
-// ---------- вход по email ----------
-app.post('/api/auth/login', (req, res) => {
-  const { email, password } = req.body || {};
-  if (typeof email !== 'string' || typeof password !== 'string') {
+// ---------- проверить код и войти ----------
+app.post('/api/auth/verify-code', (req, res) => {
+  const email = (req.body && req.body.email || '').trim();
+  const code = String((req.body && req.body.code) || '').trim();
+
+  if (!EMAIL_RE.test(email) || !/^\d{6}$/.test(code)) {
     return res.status(400).json({ error: 'bad request' });
   }
-  const userId = emails.get(email.trim().toLowerCase());
-  if (!userId) return res.status(401).json({ error: 'invalid credentials' });
 
-  const user = users.get(userId);
-  if (hashPassword(password, user.salt) !== user.passHash) {
-    return res.status(401).json({ error: 'invalid credentials' });
+  const lower = email.toLowerCase();
+  const rec = otpCodes.get(lower);
+  if (!rec) return res.status(400).json({ error: 'Код не запрашивался или истёк' });
+  if (Date.now() > rec.expiresAt) {
+    otpCodes.delete(lower);
+    return res.status(400).json({ error: 'Код истёк, запроси новый' });
   }
 
+  rec.attempts++;
+  if (rec.attempts > OTP_MAX_ATTEMPTS) {
+    otpCodes.delete(lower);
+    return res.status(429).json({ error: 'Слишком много попыток, запроси новый код' });
+  }
+
+  if (rec.code !== code) {
+    return res.status(401).json({ error: 'Неверный код' });
+  }
+
+  // код верный — удаляем
+  otpCodes.delete(lower);
+
+  // находим или создаём юзера
+  let userId = emails.get(lower);
+  let isNewUser = false;
+
+  if (!userId) {
+    isNewUser = true;
+    userId = 'u_' + crypto.randomBytes(8).toString('hex');
+    const user = {
+      id: userId,
+      email,
+      username: null,
+      name: null,
+      bio: '',
+      color: '#5288c1',
+    };
+    users.set(userId, user);
+    emails.set(lower, userId);
+  }
+
+  const user = users.get(userId);
   const token = crypto.randomBytes(24).toString('hex');
   sessions.set(token, userId);
-  res.json({ token, user: publicUser(user), isNewUser: !user.username });
+
+  res.json({
+    token,
+    user: publicUser(user),
+    isNewUser: isNewUser || !user.username,
+  });
 });
 
 // ---------- профиль ----------
@@ -109,7 +187,6 @@ app.get('/api/me', authMiddleware, (req, res) => {
   res.json({ user: publicUser(users.get(req.userId)) });
 });
 
-// ---------- онбординг: username + name + bio ----------
 app.post('/api/profile', authMiddleware, (req, res) => {
   const { username, name, bio } = req.body || {};
   if (typeof name !== 'string' || name.trim().length < 2) {
@@ -121,7 +198,6 @@ app.post('/api/profile', authMiddleware, (req, res) => {
   const user = users.get(req.userId);
   if (!user) return res.status(404).json({ error: 'no user' });
 
-  // юзернейм задаётся один раз
   if (!user.username) {
     if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
       return res.status(400).json({ error: 'bad username' });
@@ -162,10 +238,7 @@ app.get('/api/chats', authMiddleware, (req, res) => {
       }
     }
 
-    list.push({
-      id: c.id, name, nameKey: c.nameKey || null,
-      isDM: !!c.isDM, memberInfo, last,
-    });
+    list.push({ id: c.id, name, nameKey: c.nameKey || null, isDM: !!c.isDM, memberInfo, last });
   }
   res.json({ chats: list });
 });
@@ -264,11 +337,9 @@ wss.on('connection', (ws) => {
       if (!c || !c.members.has(ctx.userId)) return;
       const text = String(msg.text || '').slice(0, 4000).trim();
       if (!text) return;
-
       const entry = { id: crypto.randomBytes(8).toString('hex'), userId: ctx.userId, text, ts: Date.now() };
       messages.get(c.id).push(entry);
       if (messages.get(c.id).length > 1000) messages.get(c.id).shift();
-
       const u = users.get(ctx.userId);
       broadcastToChat(c.id, { type: 'message', chatId: c.id, message: entry, user: publicUser(u) });
       return;
@@ -285,7 +356,6 @@ wss.on('connection', (ws) => {
       send(ws, { type: 'call_ringing', callId });
       return;
     }
-
     if (msg.type === 'call_answer') {
       const call = activeCalls.get(msg.callId);
       if (!call || call.toUserId !== ctx.userId) return;
@@ -293,7 +363,6 @@ wss.on('connection', (ws) => {
       else { sendToUser(call.fromUserId, { type: 'call_rejected', callId: msg.callId }); activeCalls.delete(msg.callId); }
       return;
     }
-
     if (msg.type === 'call_ice') {
       const call = activeCalls.get(msg.callId);
       if (!call) return;
@@ -301,7 +370,6 @@ wss.on('connection', (ws) => {
       sendToUser(other, { type: 'call_ice', callId: msg.callId, candidate: msg.candidate });
       return;
     }
-
     if (msg.type === 'call_end') {
       const call = activeCalls.get(msg.callId);
       if (!call) return;
@@ -334,5 +402,13 @@ setInterval(() => {
     try { ws.ping(); } catch {}
   }
 }, 30000);
+
+// очистка истёкших кодов раз в 5 минут
+setInterval(() => {
+  const now = Date.now();
+  for (const [email, rec] of otpCodes) {
+    if (now > rec.expiresAt) otpCodes.delete(email);
+  }
+}, 5 * 60 * 1000);
 
 server.listen(PORT, () => console.log(`ЗахаркаГрам server on :${PORT}`));
