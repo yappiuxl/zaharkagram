@@ -1,0 +1,26 @@
+{
+  "name": "ЗахаркаГрам",
+  "short_name": "ЗахаркаГрам",
+  "description": "Быстрый и безопасный мессенджер",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0e1621",
+  "theme_color": "#5288c1",
+  "lang": "ru",
+  "icons": [
+    {
+      "src": "/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
