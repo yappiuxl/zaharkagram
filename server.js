@@ -8,9 +8,10 @@ import crypto from 'crypto';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
 
-const users = new Map();
-const sessions = new Map();
-const usernames = new Map();
+const users = new Map();       // userId -> { id, email, username, name, bio, color, passHash, salt }
+const sessions = new Map();    // token -> userId
+const emails = new Map();      // email.toLowerCase() -> userId
+const usernames = new Map();   // username.toLowerCase() -> userId
 const chats = new Map();
 const messages = new Map();
 
@@ -35,6 +36,7 @@ function hashPassword(password, salt) {
   return crypto.createHash('sha256').update(salt + ':' + password).digest('hex');
 }
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USERNAME_RE = /^[a-zA-Z][a-zA-Z0-9_]{4,31}$/;
 
 function publicUser(u) {
@@ -49,37 +51,47 @@ function authMiddleware(req, res, next) {
   next();
 }
 
+// ---------- регистрация по email ----------
 app.post('/api/auth/register', (req, res) => {
-  const { username, password } = req.body || {};
-  if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
-    return res.status(400).json({ error: 'bad username' });
+  const { email, password } = req.body || {};
+  if (typeof email !== 'string' || !EMAIL_RE.test(email.trim())) {
+    return res.status(400).json({ error: 'bad email' });
   }
   if (typeof password !== 'string' || password.length < 6) {
     return res.status(400).json({ error: 'short password' });
   }
-  const lower = username.toLowerCase();
-  if (usernames.has(lower)) return res.status(409).json({ error: 'username taken' });
+
+  const lowerEmail = email.trim().toLowerCase();
+  if (emails.has(lowerEmail)) return res.status(409).json({ error: 'email taken' });
 
   const salt = crypto.randomBytes(16).toString('hex');
   const userId = 'u_' + crypto.randomBytes(8).toString('hex');
   const user = {
-    id: userId, username, name: null, bio: '', color: '#5288c1',
-    salt, passHash: hashPassword(password, salt),
+    id: userId,
+    email: email.trim(),
+    username: null,
+    name: null,
+    bio: '',
+    color: '#5288c1',
+    salt,
+    passHash: hashPassword(password, salt),
   };
+
   users.set(userId, user);
-  usernames.set(lower, userId);
+  emails.set(lowerEmail, userId);
 
   const token = crypto.randomBytes(24).toString('hex');
   sessions.set(token, userId);
   res.json({ token, user: publicUser(user), isNewUser: true });
 });
 
+// ---------- вход по email ----------
 app.post('/api/auth/login', (req, res) => {
-  const { username, password } = req.body || {};
-  if (typeof username !== 'string' || typeof password !== 'string') {
+  const { email, password } = req.body || {};
+  if (typeof email !== 'string' || typeof password !== 'string') {
     return res.status(400).json({ error: 'bad request' });
   }
-  const userId = usernames.get(username.toLowerCase());
+  const userId = emails.get(email.trim().toLowerCase());
   if (!userId) return res.status(401).json({ error: 'invalid credentials' });
 
   const user = users.get(userId);
@@ -89,15 +101,17 @@ app.post('/api/auth/login', (req, res) => {
 
   const token = crypto.randomBytes(24).toString('hex');
   sessions.set(token, userId);
-  res.json({ token, user: publicUser(user), isNewUser: !user.name });
+  res.json({ token, user: publicUser(user), isNewUser: !user.username });
 });
 
+// ---------- профиль ----------
 app.get('/api/me', authMiddleware, (req, res) => {
   res.json({ user: publicUser(users.get(req.userId)) });
 });
 
+// ---------- онбординг: username + name + bio ----------
 app.post('/api/profile', authMiddleware, (req, res) => {
-  const { name, bio } = req.body || {};
+  const { username, name, bio } = req.body || {};
   if (typeof name !== 'string' || name.trim().length < 2) {
     return res.status(400).json({ error: 'bad name' });
   }
@@ -106,6 +120,18 @@ app.post('/api/profile', authMiddleware, (req, res) => {
 
   const user = users.get(req.userId);
   if (!user) return res.status(404).json({ error: 'no user' });
+
+  // юзернейм задаётся один раз
+  if (!user.username) {
+    if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
+      return res.status(400).json({ error: 'bad username' });
+    }
+    const lower = username.toLowerCase();
+    if (usernames.has(lower)) return res.status(409).json({ error: 'username taken' });
+    user.username = username;
+    usernames.set(lower, user.id);
+  }
+
   user.name = name.trim();
   user.bio = (bio || '').trim();
 
@@ -115,6 +141,7 @@ app.post('/api/profile', authMiddleware, (req, res) => {
   res.json({ user: publicUser(user) });
 });
 
+// ---------- чаты ----------
 app.get('/api/chats', authMiddleware, (req, res) => {
   const list = [];
   for (const c of chats.values()) {
@@ -150,10 +177,7 @@ app.get('/api/chats/:id/messages', authMiddleware, (req, res) => {
   res.json({
     messages: raw.map(m => {
       const u = users.get(m.userId);
-      return {
-        id: m.id, userId: m.userId, text: m.text, ts: m.ts,
-        user: u ? publicUser(u) : null,
-      };
+      return { id: m.id, userId: m.userId, text: m.text, ts: m.ts, user: u ? publicUser(u) : null };
     }),
   });
 });
@@ -163,7 +187,7 @@ app.get('/api/users', authMiddleware, (req, res) => {
   const out = [];
   for (const u of users.values()) {
     if (u.id === req.userId) continue;
-    if (!u.name) continue;
+    if (!u.username || !u.name) continue;
     if (q && !u.username.toLowerCase().includes(q) && !u.name.toLowerCase().includes(q)) continue;
     out.push(publicUser(u));
     if (out.length >= 30) break;
@@ -189,20 +213,14 @@ app.post('/api/dialog', authMiddleware, (req, res) => {
 // ---------- WS ----------
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
-const clients = new Map(); // ws -> { userId, chatId }
+const clients = new Map();
 
-function send(ws, packet) {
-  if (ws.readyState === 1) ws.send(JSON.stringify(packet));
-}
-
+function send(ws, packet) { if (ws.readyState === 1) ws.send(JSON.stringify(packet)); }
 function sendToUser(userId, packet) {
   for (const [ws, ctx] of clients) {
-    if (ctx.userId === userId && ws.readyState === 1) {
-      ws.send(JSON.stringify(packet));
-    }
+    if (ctx.userId === userId && ws.readyState === 1) ws.send(JSON.stringify(packet));
   }
 }
-
 function broadcastToChat(chatId, packet) {
   const data = JSON.stringify(packet);
   for (const [ws, ctx] of clients) {
@@ -210,7 +228,6 @@ function broadcastToChat(chatId, packet) {
   }
 }
 
-// активные звонки: callId -> { fromUserId, toUserId, chatId, type: 'audio'|'video' }
 const activeCalls = new Map();
 
 wss.on('connection', (ws) => {
@@ -218,8 +235,7 @@ wss.on('connection', (ws) => {
   ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (raw) => {
-    let msg;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
 
     if (msg.type === 'auth') {
       const userId = sessions.get(msg.token);
@@ -254,54 +270,30 @@ wss.on('connection', (ws) => {
       if (messages.get(c.id).length > 1000) messages.get(c.id).shift();
 
       const u = users.get(ctx.userId);
-      broadcastToChat(c.id, {
-        type: 'message', chatId: c.id, message: entry, user: publicUser(u),
-      });
+      broadcastToChat(c.id, { type: 'message', chatId: c.id, message: entry, user: publicUser(u) });
       return;
     }
 
-    // ---------- ЗВОНКИ: сигналинг ----------
-
-    // инициатор звонит
     if (msg.type === 'call_offer') {
       const { chatId, toUserId, callType, sdp } = msg;
       const c = chats.get(chatId);
       if (!c || !c.members.has(ctx.userId)) return;
       const callId = crypto.randomBytes(8).toString('hex');
-      activeCalls.set(callId, {
-        fromUserId: ctx.userId,
-        toUserId,
-        chatId,
-        type: callType === 'video' ? 'video' : 'audio',
-      });
+      activeCalls.set(callId, { fromUserId: ctx.userId, toUserId, chatId, type: callType === 'video' ? 'video' : 'audio' });
       const u = users.get(ctx.userId);
-      sendToUser(toUserId, {
-        type: 'call_incoming',
-        callId,
-        chatId,
-        fromUser: publicUser(u),
-        callType: activeCalls.get(callId).type,
-        sdp,
-      });
+      sendToUser(toUserId, { type: 'call_incoming', callId, chatId, fromUser: publicUser(u), callType: activeCalls.get(callId).type, sdp });
       send(ws, { type: 'call_ringing', callId });
       return;
     }
 
-    // приём/отклонение
     if (msg.type === 'call_answer') {
       const call = activeCalls.get(msg.callId);
       if (!call || call.toUserId !== ctx.userId) return;
-
-      if (msg.accepted) {
-        sendToUser(call.fromUserId, { type: 'call_accepted', callId: msg.callId, sdp: msg.sdp });
-      } else {
-        sendToUser(call.fromUserId, { type: 'call_rejected', callId: msg.callId });
-        activeCalls.delete(msg.callId);
-      }
+      if (msg.accepted) sendToUser(call.fromUserId, { type: 'call_accepted', callId: msg.callId, sdp: msg.sdp });
+      else { sendToUser(call.fromUserId, { type: 'call_rejected', callId: msg.callId }); activeCalls.delete(msg.callId); }
       return;
     }
 
-    // ICE кандидаты
     if (msg.type === 'call_ice') {
       const call = activeCalls.get(msg.callId);
       if (!call) return;
@@ -310,7 +302,6 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // завершение
     if (msg.type === 'call_end') {
       const call = activeCalls.get(msg.callId);
       if (!call) return;
@@ -324,7 +315,6 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     const ctx = clients.get(ws);
     clients.delete(ws);
-    // если у юзера был активный звонок — сообщаем второму
     if (ctx) {
       for (const [callId, call] of activeCalls) {
         if (call.fromUserId === ctx.userId || call.toUserId === ctx.userId) {
@@ -345,6 +335,4 @@ setInterval(() => {
   }
 }, 30000);
 
-server.listen(PORT, () => {
-  console.log(`ЗахаркаГрам server on :${PORT}`);
-});
+server.listen(PORT, () => console.log(`ЗахаркаГрам server on :${PORT}`));
