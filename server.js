@@ -17,9 +17,10 @@ const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 const users = new Map();       // userId -> { id, name, username, bio, email, picture, color }
 const sessions = new Map();    // token -> userId
 const usernames = new Map();   // username.toLowerCase() -> userId
-const chats = new Map();       // chatId -> { id, nameKey?, name?, members:Set<userId> }
+const chats = new Map();       // chatId -> { id, name?, nameKey?, members:Set, isDM? }
 const messages = new Map();    // chatId -> [{ id, userId, text, ts }]
 
+// общий чат
 const GLOBAL_CHAT = 'global';
 chats.set(GLOBAL_CHAT, { id: GLOBAL_CHAT, name: 'Общий чат', members: new Set() });
 messages.set(GLOBAL_CHAT, []);
@@ -37,10 +38,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// статика
+// статика (index.html, manifest.json, sw.js, icon.png лежат рядом с server.js)
 app.use(express.static(__dirname, { extensions: ['html'] }));
 
-// ---------- auth ----------
+// ---------- auth middleware ----------
 function authMiddleware(req, res, next) {
   const token = (req.headers.authorization || '').replace('Bearer ', '');
   const userId = token && sessions.get(token);
@@ -50,7 +51,31 @@ function authMiddleware(req, res, next) {
   next();
 }
 
-// верификация Google id_token
+// ---------- демо-вход (пока нет реального OAuth) ----------
+app.post('/api/auth/demo', (req, res) => {
+  const { googleId, name } = req.body || {};
+  if (!googleId) return res.status(400).json({ error: 'no googleId' });
+
+  let user = users.get(googleId);
+  let isNewUser = false;
+  if (!user) {
+    isNewUser = true;
+    user = {
+      id: googleId,
+      name: null,
+      username: null,
+      bio: '',
+      color: '#5288c1',
+    };
+    users.set(googleId, user);
+  }
+
+  const token = crypto.randomBytes(24).toString('hex');
+  sessions.set(token, googleId);
+  res.json({ token, user, isNewUser });
+});
+
+// ---------- реальный Google OAuth ----------
 app.post('/api/auth/google', async (req, res) => {
   const { credential } = req.body || {};
   if (!credential) return res.status(400).json({ error: 'no credential' });
@@ -82,7 +107,6 @@ app.post('/api/auth/google', async (req, res) => {
 
     const token = crypto.randomBytes(24).toString('hex');
     sessions.set(token, googleId);
-
     res.json({ token, user, isNewUser });
   } catch (e) {
     console.error('google auth error', e.message);
@@ -90,12 +114,12 @@ app.post('/api/auth/google', async (req, res) => {
   }
 });
 
-// профиль
+// ---------- профиль ----------
 app.get('/api/me', authMiddleware, (req, res) => {
   res.json({ user: users.get(req.userId) });
 });
 
-// завершение онбординга
+// ---------- завершение онбординга ----------
 app.post('/api/profile', authMiddleware, (req, res) => {
   const { name, username, bio } = req.body || {};
   if (typeof name !== 'string' || name.trim().length < 2) {
@@ -132,37 +156,104 @@ app.post('/api/profile', authMiddleware, (req, res) => {
   res.json({ user });
 });
 
-// чаты пользователя
+// ---------- чаты пользователя ----------
 app.get('/api/chats', authMiddleware, (req, res) => {
   const list = [];
   for (const c of chats.values()) {
     if (!c.members.has(req.userId)) continue;
     const last = messages.get(c.id).slice(-1)[0] || null;
+
+    let name = c.name || null;
+    let memberInfo = null;
+
+    if (c.isDM) {
+      // находим второго участника
+      for (const mid of c.members) {
+        if (mid !== req.userId) {
+          const other = users.get(mid);
+          if (other) {
+            memberInfo = { id: other.id, name: other.name, username: other.username, color: other.color };
+            name = other.name || other.username || 'Чат';
+          }
+        }
+      }
+    }
+
     list.push({
       id: c.id,
-      name: c.name || null,
+      name,
       nameKey: c.nameKey || null,
+      isDM: !!c.isDM,
+      memberInfo,
       last,
     });
   }
   res.json({ chats: list });
 });
 
-// сообщения чата
+// ---------- сообщения чата ----------
 app.get('/api/chats/:id/messages', authMiddleware, (req, res) => {
   const c = chats.get(req.params.id);
   if (!c || !c.members.has(req.userId)) return res.status(403).json({ error: 'forbidden' });
-  res.json({ messages: messages.get(c.id) || [] });
+  const raw = messages.get(c.id) || [];
+  const out = raw.map(m => {
+    const u = users.get(m.userId);
+    return {
+      id: m.id,
+      userId: m.userId,
+      text: m.text,
+      ts: m.ts,
+      user: u ? { id: u.id, name: u.name, username: u.username, color: u.color } : null,
+    };
+  });
+  res.json({ messages: out });
 });
 
-// список пользователей (простой, для теста)
+// ---------- поиск пользователей ----------
 app.get('/api/users', authMiddleware, (req, res) => {
+  const q = String(req.query.q || '').toLowerCase().trim();
   const out = [];
   for (const u of users.values()) {
     if (!u.username) continue;
+    if (u.id === req.userId) continue;
+    if (q && !u.username.toLowerCase().includes(q) && !(u.name || '').toLowerCase().includes(q)) continue;
     out.push({ id: u.id, name: u.name, username: u.username, bio: u.bio, color: u.color });
+    if (out.length >= 30) break;
   }
   res.json({ users: out });
+});
+
+// ---------- создать/открыть личный диалог ----------
+app.post('/api/dialog', authMiddleware, (req, res) => {
+  const otherId = req.body && req.body.userId;
+  if (!otherId || !users.has(otherId)) return res.status(400).json({ error: 'no user' });
+  if (otherId === req.userId) return res.status(400).json({ error: 'self dialog' });
+
+  const ids = [req.userId, otherId].sort();
+  const chatId = 'dm_' + ids[0] + '_' + ids[1];
+
+  if (!chats.has(chatId)) {
+    chats.set(chatId, {
+      id: chatId,
+      members: new Set([req.userId, otherId]),
+      isDM: true,
+    });
+    messages.set(chatId, []);
+  }
+
+  const other = users.get(otherId);
+  res.json({
+    chat: {
+      id: chatId,
+      isDM: true,
+      memberInfo: {
+        id: other.id,
+        name: other.name,
+        username: other.username,
+        color: other.color,
+      },
+    },
+  });
 });
 
 // ---------- ws ----------
@@ -235,7 +326,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => clients.delete(ws));
 });
 
-// ping/pong
+// ping/pong чтобы Render не рвал соединения
 setInterval(() => {
   for (const ws of wss.clients) {
     if (ws.isAlive === false) { ws.terminate(); continue; }
