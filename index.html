@@ -35,7 +35,6 @@
     background: var(--bg); color: var(--text); overflow: hidden; font-size: 15px;
     transition: background .2s, color .2s;
   }
-
   .screen { display: none; height: 100vh; height: 100dvh; }
   .screen.active { display: flex; }
 
@@ -56,19 +55,10 @@
     border: 1px solid var(--border); border-radius: 16px;
     padding: 24px; box-shadow: 0 20px 60px var(--card-shadow);
   }
-  .auth-tabs {
-    display: flex; gap: 4px; background: var(--bg-input);
-    padding: 4px; border-radius: 10px; margin-bottom: 18px;
-  }
-  .auth-tab {
-    flex: 1; padding: 9px; border-radius: 7px; text-align: center;
-    font-size: 14px; font-weight: 500; cursor: pointer; color: var(--text-dim);
-    transition: background .15s, color .15s;
-  }
-  .auth-tab.active { background: var(--bg); color: var(--text); }
-  body[data-theme="dark"] .auth-tab.active { background: var(--bg-panel); }
-  .auth-form { display: none; }
-  .auth-form.active { display: block; }
+  .auth-step { display: none; }
+  .auth-step.active { display: block; }
+  .auth-step-title { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
+  .auth-step-sub { font-size: 13px; color: var(--text-dim); margin-bottom: 18px; }
 
   .field { margin-bottom: 14px; }
   .field label {
@@ -95,6 +85,13 @@
     font-size: 15px; pointer-events: none;
   }
   .username-prefix input { padding-left: 30px; }
+  .code-input {
+    font-size: 28px !important;
+    text-align: center;
+    letter-spacing: 12px;
+    font-family: 'SF Mono', Menlo, monospace !important;
+    padding: 14px !important;
+  }
 
   .btn-primary {
     width: 100%; background: var(--accent); color: #fff;
@@ -105,9 +102,23 @@
   .btn-primary:hover { background: var(--accent-hover); }
   .btn-primary:active { transform: scale(.98); }
   .btn-primary:disabled { opacity: .6; cursor: not-allowed; }
+  .btn-link {
+    width: 100%; background: transparent; color: var(--accent);
+    border: none; border-radius: 10px; padding: 10px;
+    font-size: 14px; cursor: pointer; margin-top: 4px;
+  }
+  .btn-link:hover { background: var(--hover); }
+  .btn-link:disabled { opacity: .5; cursor: not-allowed; }
   .auth-error {
     color: var(--danger); font-size: 13px;
     text-align: center; margin-top: 12px; min-height: 18px;
+  }
+  .auth-info {
+    color: var(--text-dim); font-size: 13px;
+    text-align: center; margin-top: 10px;
+  }
+  .email-shown {
+    color: var(--accent); font-weight: 500;
   }
 
   #onboarding {
@@ -528,40 +539,33 @@
   <div class="logo">З</div>
   <h1>ЗахаркаГрам</h1>
   <div class="auth-card">
-    <div class="auth-tabs">
-      <div class="auth-tab active" data-mode="login">Вход</div>
-      <div class="auth-tab" data-mode="register">Регистрация</div>
-    </div>
 
-    <div class="auth-form active" id="formLogin">
+    <!-- Шаг 1: email -->
+    <div class="auth-step active" id="stepEmail">
+      <div class="auth-step-title">Вход в аккаунт</div>
+      <div class="auth-step-sub">Введи email — пришлём 6-значный код</div>
       <div class="field">
         <label>Email</label>
-        <input type="email" id="loginEmail" placeholder="you@example.com" autocomplete="email">
+        <input type="email" id="authEmail" placeholder="you@example.com" autocomplete="email">
       </div>
-      <div class="field">
-        <label>Пароль</label>
-        <input type="password" id="loginPassword" placeholder="••••••" autocomplete="current-password">
-      </div>
-      <button class="btn-primary" id="loginBtn">Войти</button>
-      <div class="auth-error" id="loginError"></div>
+      <button class="btn-primary" id="sendCodeBtn">Получить код</button>
+      <div class="auth-error" id="emailError"></div>
     </div>
 
-    <div class="auth-form" id="formRegister">
+    <!-- Шаг 2: код -->
+    <div class="auth-step" id="stepCode">
+      <div class="auth-step-title">Введи код</div>
+      <div class="auth-step-sub">Код отправлен на <span class="email-shown" id="codeEmailShow">—</span></div>
       <div class="field">
-        <label>Email</label>
-        <input type="email" id="regEmail" placeholder="you@example.com" autocomplete="email">
+        <input type="text" id="authCode" class="code-input" placeholder="000000" maxlength="6" inputmode="numeric" autocomplete="one-time-code">
       </div>
-      <div class="field">
-        <label>Пароль</label>
-        <input type="password" id="regPassword" placeholder="Минимум 6 символов" autocomplete="new-password">
-      </div>
-      <div class="field">
-        <label>Повтори пароль</label>
-        <input type="password" id="regPassword2" placeholder="Ещё раз" autocomplete="new-password">
-      </div>
-      <button class="btn-primary" id="registerBtn">Создать аккаунт</button>
-      <div class="auth-error" id="registerError"></div>
+      <button class="btn-primary" id="verifyBtn">Войти</button>
+      <button class="btn-link" id="resendBtn">Отправить код ещё раз</button>
+      <button class="btn-link" id="backToEmailBtn">← Изменить email</button>
+      <div class="auth-error" id="codeError"></div>
+      <div class="auth-info" id="codeInfo"></div>
     </div>
+
   </div>
 </div>
 
@@ -770,6 +774,7 @@ const state = {
   me: null, token: null, chats: [], users: [],
   activeChatId: null, currentTab: 'chats', ws: null,
   unread: {},
+  pendingEmail: null,
 };
 
 let theme = localStorage.getItem('zkg_theme') || 'dark';
@@ -910,29 +915,59 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
-document.querySelectorAll('.auth-tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    const mode = tab.dataset.mode;
-    document.querySelectorAll('.auth-tab').forEach(t => t.classList.toggle('active', t.dataset.mode === mode));
-    $('formLogin').classList.toggle('active', mode === 'login');
-    $('formRegister').classList.toggle('active', mode === 'register');
-    $('loginError').textContent = '';
-    $('registerError').textContent = '';
-  });
+// ==== ЛОГИН: шаг 1 — email ====
+function showLoginStep(step) {
+  $('stepEmail').classList.toggle('active', step === 'email');
+  $('stepCode').classList.toggle('active', step === 'code');
+  $('emailError').textContent = '';
+  $('codeError').textContent = '';
+}
+
+$('sendCodeBtn').addEventListener('click', async () => {
+  const email = $('authEmail').value.trim();
+  $('emailError').textContent = '';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    $('emailError').textContent = 'Неверный формат email';
+    return;
+  }
+
+  const btn = $('sendCodeBtn'); btn.disabled = true;
+  try {
+    await api('/api/auth/send-code', { method: 'POST', body: JSON.stringify({ email }) });
+    state.pendingEmail = email;
+    $('codeEmailShow').textContent = email;
+    $('authCode').value = '';
+    showLoginStep('code');
+    $('codeInfo').textContent = 'Проверь почту. Код действует 10 минут.';
+    setTimeout(() => $('authCode').focus(), 100);
+  } catch (e) {
+    $('emailError').textContent = e.message;
+  } finally { btn.disabled = false; }
 });
 
-$('loginBtn').addEventListener('click', async () => {
-  const email = $('loginEmail').value.trim();
-  const password = $('loginPassword').value;
-  $('loginError').textContent = '';
-  if (!email || !password) { $('loginError').textContent = 'Заполни оба поля'; return; }
+$('authEmail').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('sendCodeBtn').click(); }
+});
 
-  const btn = $('loginBtn'); btn.disabled = true;
+// ==== ЛОГИН: шаг 2 — код ====
+$('verifyBtn').addEventListener('click', async () => {
+  const code = $('authCode').value.trim();
+  const email = state.pendingEmail;
+  $('codeError').textContent = '';
+
+  if (!email) { showLoginStep('email'); return; }
+  if (!/^\d{6}$/.test(code)) { $('codeError').textContent = 'Введи 6 цифр'; return; }
+
+  const btn = $('verifyBtn'); btn.disabled = true;
   try {
-    const data = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
+    const data = await api('/api/auth/verify-code', {
+      method: 'POST',
+      body: JSON.stringify({ email, code }),
+    });
     state.token = data.token;
     state.me = data.user;
     localStorage.setItem('zkg_token', data.token);
+    state.pendingEmail = null;
 
     if (data.isNewUser || !data.user.username) {
       $('login').classList.remove('active');
@@ -943,34 +978,45 @@ $('loginBtn').addEventListener('click', async () => {
       await bootApp();
     }
   } catch (e) {
-    $('loginError').textContent = e.message === 'invalid credentials'
-      ? 'Неверный email или пароль' : e.message;
+    $('codeError').textContent = e.message;
   } finally { btn.disabled = false; }
 });
 
-$('registerBtn').addEventListener('click', async () => {
-  const email = $('regEmail').value.trim();
-  const password = $('regPassword').value;
-  const password2 = $('regPassword2').value;
-  const err = $('registerError');
-  err.textContent = '';
+$('authCode').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('verifyBtn').click(); }
+});
 
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { err.textContent = 'Неверный формат email'; return; }
-  if (password.length < 6) { err.textContent = 'Пароль минимум 6 символов'; return; }
-  if (password !== password2) { err.textContent = 'Пароли не совпадают'; return; }
+$('authCode').addEventListener('input', (e) => {
+  e.target.value = e.target.value.replace(/\D/g, '').slice(0, 6);
+});
 
-  const btn = $('registerBtn'); btn.disabled = true;
+$('resendBtn').addEventListener('click', async () => {
+  const email = state.pendingEmail;
+  if (!email) return;
+  const btn = $('resendBtn'); btn.disabled = true;
+  $('codeError').textContent = '';
   try {
-    const data = await api('/api/auth/register', { method: 'POST', body: JSON.stringify({ email, password }) });
-    state.token = data.token;
-    state.me = data.user;
-    localStorage.setItem('zkg_token', data.token);
-    $('login').classList.remove('active');
-    $('onboarding').classList.add('active');
-    setTimeout(() => $('onbUsername').focus(), 100);
+    await api('/api/auth/send-code', { method: 'POST', body: JSON.stringify({ email }) });
+    $('codeInfo').textContent = 'Код отправлен повторно';
+    $('authCode').value = '';
+    setTimeout(() => { btn.disabled = false; }, 30000);
+    let left = 30;
+    const iv = setInterval(() => {
+      left--;
+      if (left <= 0) { clearInterval(iv); btn.textContent = 'Отправить код ещё раз'; return; }
+      btn.textContent = `Отправить через ${left}с`;
+    }, 1000);
+    btn.textContent = `Отправить через 30с`;
   } catch (e) {
-    err.textContent = e.message === 'email taken' ? 'Этот email уже зарегистрирован' : e.message;
-  } finally { btn.disabled = false; }
+    $('codeError').textContent = e.message;
+    btn.disabled = false;
+  }
+});
+
+$('backToEmailBtn').addEventListener('click', () => {
+  state.pendingEmail = null;
+  showLoginStep('email');
+  setTimeout(() => $('authEmail').focus(), 100);
 });
 
 // ==== ОНБОРДИНГ ====
@@ -1167,9 +1213,7 @@ async function handleWSMessage(msg) {
     renderChatList($('searchInput').value);
     return;
   }
-
   if (msg.type === 'call_ringing') { if (call.active && call.active.isCaller) call.active.callId = msg.callId; return; }
-
   if (msg.type === 'call_incoming') {
     if (call.active || call.incoming) { wsSend({ type: 'call_answer', callId: msg.callId, accepted: false }); return; }
     call.incoming = msg;
@@ -1496,4 +1540,4 @@ $('logoutItem').addEventListener('click', () => {
 })();
 </script>
 </body>
-         </html>
+</html>
