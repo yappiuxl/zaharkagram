@@ -8,18 +8,16 @@ import crypto from 'crypto';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
 
-// ---------- in-memory хранилище ----------
-const users = new Map();        // userId -> { id, username, name, bio, color, passHash, salt }
-const sessions = new Map();     // token -> userId
-const usernames = new Map();    // username.toLowerCase() -> userId
-const chats = new Map();        // chatId -> { id, name?, members:Set, isDM? }
-const messages = new Map();     // chatId -> [{ id, userId, text, ts }]
+const users = new Map();
+const sessions = new Map();
+const usernames = new Map();
+const chats = new Map();
+const messages = new Map();
 
 const GLOBAL_CHAT = 'global';
 chats.set(GLOBAL_CHAT, { id: GLOBAL_CHAT, name: 'Общий чат', members: new Set() });
 messages.set(GLOBAL_CHAT, []);
 
-// ---------- express ----------
 const app = express();
 app.use(express.json({ limit: '64kb' }));
 
@@ -33,7 +31,6 @@ app.use((req, res, next) => {
 
 app.use(express.static(__dirname, { extensions: ['html'] }));
 
-// ---------- утилиты ----------
 function hashPassword(password, salt) {
   return crypto.createHash('sha256').update(salt + ':' + password).digest('hex');
 }
@@ -52,7 +49,6 @@ function authMiddleware(req, res, next) {
   next();
 }
 
-// ---------- регистрация ----------
 app.post('/api/auth/register', (req, res) => {
   const { username, password } = req.body || {};
   if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
@@ -61,33 +57,23 @@ app.post('/api/auth/register', (req, res) => {
   if (typeof password !== 'string' || password.length < 6) {
     return res.status(400).json({ error: 'short password' });
   }
-
   const lower = username.toLowerCase();
   if (usernames.has(lower)) return res.status(409).json({ error: 'username taken' });
 
   const salt = crypto.randomBytes(16).toString('hex');
   const userId = 'u_' + crypto.randomBytes(8).toString('hex');
-
   const user = {
-    id: userId,
-    username,
-    name: null,         // заполнится на онбординге
-    bio: '',
-    color: '#5288c1',
-    salt,
-    passHash: hashPassword(password, salt),
+    id: userId, username, name: null, bio: '', color: '#5288c1',
+    salt, passHash: hashPassword(password, salt),
   };
-
   users.set(userId, user);
   usernames.set(lower, userId);
 
   const token = crypto.randomBytes(24).toString('hex');
   sessions.set(token, userId);
-
   res.json({ token, user: publicUser(user), isNewUser: true });
 });
 
-// ---------- вход ----------
 app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body || {};
   if (typeof username !== 'string' || typeof password !== 'string') {
@@ -97,16 +83,15 @@ app.post('/api/auth/login', (req, res) => {
   if (!userId) return res.status(401).json({ error: 'invalid credentials' });
 
   const user = users.get(userId);
-  const hash = hashPassword(password, user.salt);
-  if (hash !== user.passHash) return res.status(401).json({ error: 'invalid credentials' });
+  if (hashPassword(password, user.salt) !== user.passHash) {
+    return res.status(401).json({ error: 'invalid credentials' });
+  }
 
   const token = crypto.randomBytes(24).toString('hex');
   sessions.set(token, userId);
-
   res.json({ token, user: publicUser(user), isNewUser: !user.name });
 });
 
-// ---------- профиль ----------
 app.get('/api/me', authMiddleware, (req, res) => {
   res.json({ user: publicUser(users.get(req.userId)) });
 });
@@ -121,7 +106,6 @@ app.post('/api/profile', authMiddleware, (req, res) => {
 
   const user = users.get(req.userId);
   if (!user) return res.status(404).json({ error: 'no user' });
-
   user.name = name.trim();
   user.bio = (bio || '').trim();
 
@@ -131,13 +115,11 @@ app.post('/api/profile', authMiddleware, (req, res) => {
   res.json({ user: publicUser(user) });
 });
 
-// ---------- чаты ----------
 app.get('/api/chats', authMiddleware, (req, res) => {
   const list = [];
   for (const c of chats.values()) {
     if (!c.members.has(req.userId)) continue;
     const last = messages.get(c.id).slice(-1)[0] || null;
-
     let name = c.name || null;
     let memberInfo = null;
 
@@ -154,12 +136,8 @@ app.get('/api/chats', authMiddleware, (req, res) => {
     }
 
     list.push({
-      id: c.id,
-      name,
-      nameKey: c.nameKey || null,
-      isDM: !!c.isDM,
-      memberInfo,
-      last,
+      id: c.id, name, nameKey: c.nameKey || null,
+      isDM: !!c.isDM, memberInfo, last,
     });
   }
   res.json({ chats: list });
@@ -173,10 +151,7 @@ app.get('/api/chats/:id/messages', authMiddleware, (req, res) => {
     messages: raw.map(m => {
       const u = users.get(m.userId);
       return {
-        id: m.id,
-        userId: m.userId,
-        text: m.text,
-        ts: m.ts,
+        id: m.id, userId: m.userId, text: m.text, ts: m.ts,
         user: u ? publicUser(u) : null,
       };
     }),
@@ -188,7 +163,7 @@ app.get('/api/users', authMiddleware, (req, res) => {
   const out = [];
   for (const u of users.values()) {
     if (u.id === req.userId) continue;
-    if (!u.name) continue; // не показываем незавершённые профили
+    if (!u.name) continue;
     if (q && !u.username.toLowerCase().includes(q) && !u.name.toLowerCase().includes(q)) continue;
     out.push(publicUser(u));
     if (out.length >= 30) break;
@@ -203,24 +178,30 @@ app.post('/api/dialog', authMiddleware, (req, res) => {
 
   const ids = [req.userId, otherId].sort();
   const chatId = 'dm_' + ids[0] + '_' + ids[1];
-
   if (!chats.has(chatId)) {
-    chats.set(chatId, {
-      id: chatId,
-      members: new Set([req.userId, otherId]),
-      isDM: true,
-    });
+    chats.set(chatId, { id: chatId, members: new Set([req.userId, otherId]), isDM: true });
     messages.set(chatId, []);
   }
-
   const other = users.get(otherId);
   res.json({ chat: { id: chatId, isDM: true, memberInfo: publicUser(other) } });
 });
 
-// ---------- ws ----------
+// ---------- WS ----------
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
-const clients = new Map();
+const clients = new Map(); // ws -> { userId, chatId }
+
+function send(ws, packet) {
+  if (ws.readyState === 1) ws.send(JSON.stringify(packet));
+}
+
+function sendToUser(userId, packet) {
+  for (const [ws, ctx] of clients) {
+    if (ctx.userId === userId && ws.readyState === 1) {
+      ws.send(JSON.stringify(packet));
+    }
+  }
+}
 
 function broadcastToChat(chatId, packet) {
   const data = JSON.stringify(packet);
@@ -228,6 +209,9 @@ function broadcastToChat(chatId, packet) {
     if (ctx.chatId === chatId && ws.readyState === 1) ws.send(data);
   }
 }
+
+// активные звонки: callId -> { fromUserId, toUserId, chatId, type: 'audio'|'video' }
+const activeCalls = new Map();
 
 wss.on('connection', (ws) => {
   ws.isAlive = true;
@@ -243,7 +227,7 @@ wss.on('connection', (ws) => {
       const chatId = msg.chatId && chats.has(msg.chatId) && chats.get(msg.chatId).members.has(userId)
         ? msg.chatId : GLOBAL_CHAT;
       clients.set(ws, { userId, chatId });
-      ws.send(JSON.stringify({ type: 'authed', userId, chatId }));
+      send(ws, { type: 'authed', userId, chatId });
       return;
     }
 
@@ -254,7 +238,7 @@ wss.on('connection', (ws) => {
       const c = chats.get(msg.chatId);
       if (c && c.members.has(ctx.userId)) {
         ctx.chatId = msg.chatId;
-        ws.send(JSON.stringify({ type: 'chat_switched', chatId: msg.chatId }));
+        send(ws, { type: 'chat_switched', chatId: msg.chatId });
       }
       return;
     }
@@ -265,26 +249,92 @@ wss.on('connection', (ws) => {
       const text = String(msg.text || '').slice(0, 4000).trim();
       if (!text) return;
 
-      const entry = {
-        id: crypto.randomBytes(8).toString('hex'),
-        userId: ctx.userId,
-        text,
-        ts: Date.now(),
-      };
+      const entry = { id: crypto.randomBytes(8).toString('hex'), userId: ctx.userId, text, ts: Date.now() };
       messages.get(c.id).push(entry);
       if (messages.get(c.id).length > 1000) messages.get(c.id).shift();
 
       const u = users.get(ctx.userId);
       broadcastToChat(c.id, {
-        type: 'message',
-        chatId: c.id,
-        message: entry,
-        user: publicUser(u),
+        type: 'message', chatId: c.id, message: entry, user: publicUser(u),
       });
+      return;
+    }
+
+    // ---------- ЗВОНКИ: сигналинг ----------
+
+    // инициатор звонит
+    if (msg.type === 'call_offer') {
+      const { chatId, toUserId, callType, sdp } = msg;
+      const c = chats.get(chatId);
+      if (!c || !c.members.has(ctx.userId)) return;
+      const callId = crypto.randomBytes(8).toString('hex');
+      activeCalls.set(callId, {
+        fromUserId: ctx.userId,
+        toUserId,
+        chatId,
+        type: callType === 'video' ? 'video' : 'audio',
+      });
+      const u = users.get(ctx.userId);
+      sendToUser(toUserId, {
+        type: 'call_incoming',
+        callId,
+        chatId,
+        fromUser: publicUser(u),
+        callType: activeCalls.get(callId).type,
+        sdp,
+      });
+      send(ws, { type: 'call_ringing', callId });
+      return;
+    }
+
+    // приём/отклонение
+    if (msg.type === 'call_answer') {
+      const call = activeCalls.get(msg.callId);
+      if (!call || call.toUserId !== ctx.userId) return;
+
+      if (msg.accepted) {
+        sendToUser(call.fromUserId, { type: 'call_accepted', callId: msg.callId, sdp: msg.sdp });
+      } else {
+        sendToUser(call.fromUserId, { type: 'call_rejected', callId: msg.callId });
+        activeCalls.delete(msg.callId);
+      }
+      return;
+    }
+
+    // ICE кандидаты
+    if (msg.type === 'call_ice') {
+      const call = activeCalls.get(msg.callId);
+      if (!call) return;
+      const other = call.fromUserId === ctx.userId ? call.toUserId : call.fromUserId;
+      sendToUser(other, { type: 'call_ice', callId: msg.callId, candidate: msg.candidate });
+      return;
+    }
+
+    // завершение
+    if (msg.type === 'call_end') {
+      const call = activeCalls.get(msg.callId);
+      if (!call) return;
+      const other = call.fromUserId === ctx.userId ? call.toUserId : call.fromUserId;
+      sendToUser(other, { type: 'call_ended', callId: msg.callId });
+      activeCalls.delete(msg.callId);
+      return;
     }
   });
 
-  ws.on('close', () => clients.delete(ws));
+  ws.on('close', () => {
+    const ctx = clients.get(ws);
+    clients.delete(ws);
+    // если у юзера был активный звонок — сообщаем второму
+    if (ctx) {
+      for (const [callId, call] of activeCalls) {
+        if (call.fromUserId === ctx.userId || call.toUserId === ctx.userId) {
+          const other = call.fromUserId === ctx.userId ? call.toUserId : call.fromUserId;
+          sendToUser(other, { type: 'call_ended', callId, reason: 'disconnect' });
+          activeCalls.delete(callId);
+        }
+      }
+    }
+  });
 });
 
 setInterval(() => {
