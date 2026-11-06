@@ -14,10 +14,10 @@ const sessions = new Map();
 const telegramIds = new Map();
 const usernames = new Map();
 const chats = new Map();      // chatId -> { id, type, name, ownerId, members: Set, isPublic }
-const messages = new Map();   // chatId -> [{ id, userId, text, ts }]
+const messages = new Map();   // chatId -> [{ id, userId, text, ts, media, poll, reactions }]
 
 const app = express();
-app.use(express.json({ limit: '64kb' }));
+app.use(express.json({ limit: '10mb' })); // Увеличили лимит для base64 картинок
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -104,19 +104,11 @@ app.post('/api/chat/create', authMiddleware, (req, res) => {
   const chatId = (type === 'group' ? 'g_' : 'c_') + crypto.randomBytes(6).toString('hex');
   const members = new Set([req.userId]);
   
-  if (type === 'channel') members.add(req.userId); // админ канала
-
   chats.set(chatId, {
-    id: chatId,
-    type,
-    name: name.trim(),
-    ownerId: req.userId,
-    members,
-    isPublic: isPublic !== false,
-    createdAt: Date.now()
+    id: chatId, type, name: name.trim(), ownerId: req.userId,
+    members, isPublic: isPublic !== false, createdAt: Date.now()
   });
   messages.set(chatId, []);
-
   res.json({ chat: { id: chatId, type, name: name.trim(), isPublic, ownerId: req.userId } });
 });
 
@@ -125,7 +117,6 @@ app.post('/api/chat/join', authMiddleware, (req, res) => {
   const chat = chats.get(chatId);
   if (!chat) return res.status(404).json({ error: 'chat not found' });
   if (!chat.isPublic) return res.status(403).json({ error: 'private chat' });
-
   chat.members.add(req.userId);
   res.json({ ok: true });
 });
@@ -138,14 +129,11 @@ app.post('/api/chat/invite', authMiddleware, (req, res) => {
   
   const target = users.get(userId);
   if (!target) return res.status(404).json({ error: 'user not found' });
-
   chat.members.add(userId);
   
-  // Системное сообщение о входе
   const entry = { id: crypto.randomBytes(8).toString('hex'), userId: 'system', text: `👤 ${target.name} присоединился к группе`, ts: Date.now(), isSystem: true };
   messages.get(chatId).push(entry);
   broadcastToChat(chatId, { type: 'message', chatId, message: entry, user: { name: 'Система' } });
-
   res.json({ ok: true });
 });
 
@@ -155,16 +143,10 @@ app.get('/api/chats', authMiddleware, (req, res) => {
   for (const c of chats.values()) {
     if (!c.members.has(req.userId)) continue;
     const last = messages.get(c.id).slice(-1)[0] || null;
-    
-    // Для личных переписок подтягиваем инфу о собеседнике
-    let memberInfo = null;
-    let name = c.name;
+    let memberInfo = null; let name = c.name;
     if (c.type === 'dm') {
       for (const mid of c.members) {
-        if (mid !== req.userId) {
-          const other = users.get(mid);
-          if (other) { memberInfo = publicUser(other); name = other.name || other.username; }
-        }
+        if (mid !== req.userId) { const other = users.get(mid); if (other) { memberInfo = publicUser(other); name = other.name || other.username; } }
       }
     }
     list.push({ id: c.id, type: c.type, name, memberInfo, last, isPublic: c.isPublic, ownerId: c.ownerId });
@@ -179,15 +161,18 @@ app.get('/api/chats/:id/messages', authMiddleware, (req, res) => {
   const raw = messages.get(c.id) || [];
   res.json({ messages: raw.map(m => {
     const u = users.get(m.userId);
-    return { id: m.id, userId: m.userId, text: m.text, ts: m.ts, user: u ? publicUser(u) : { name: 'Система' }, isSystem: m.isSystem };
+    return { 
+      id: m.id, userId: m.userId, text: m.text, ts: m.ts, 
+      user: u ? publicUser(u) : { name: 'Система' }, 
+      isSystem: m.isSystem, media: m.media, poll: m.poll, reactions: m.reactions || {} 
+    };
   })});
 });
 
 // ---------- Поиск ----------
 app.get('/api/search', authMiddleware, (req, res) => {
   const q = String(req.query.q || '').toLowerCase().trim();
-  const foundUsers = [];
-  const foundChats = [];
+  const foundUsers = []; const foundChats = [];
 
   for (const u of users.values()) {
     if (u.id === req.userId || !u.username || !u.name) continue;
@@ -195,14 +180,12 @@ app.get('/api/search', authMiddleware, (req, res) => {
     foundUsers.push(publicUser(u));
     if (foundUsers.length >= 15) break;
   }
-
   for (const c of chats.values()) {
     if (c.type === 'dm' || !c.isPublic) continue;
     if (q && !c.name.toLowerCase().includes(q)) continue;
     foundChats.push({ id: c.id, type: c.type, name: c.name, membersCount: c.members.size });
     if (foundChats.length >= 15) break;
   }
-
   res.json({ users: foundUsers, chats: foundChats });
 });
 
@@ -221,7 +204,7 @@ app.post('/api/dialog', authMiddleware, (req, res) => {
 
 // ---------- WS ----------
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 15 * 1024 * 1024 }); // 15MB для медиа
 const clients = new Map();
 
 function send(ws, p) { if (ws.readyState === 1) ws.send(JSON.stringify(p)); }
@@ -255,32 +238,70 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'switch_chat') {
       const c = chats.get(msg.chatId);
-      if (c && c.members.has(ctx.userId)) {
-        ctx.chatId = msg.chatId;
-        send(ws, { type: 'chat_switched', chatId: msg.chatId });
-      }
+      if (c && c.members.has(ctx.userId)) { ctx.chatId = msg.chatId; send(ws, { type: 'chat_switched', chatId: msg.chatId }); }
       return;
     }
 
     if (msg.type === 'message') {
       const c = chats.get(ctx.chatId);
       if (!c || !c.members.has(ctx.userId)) return;
-      
-      // Права: в канале писать могут только ownerId
-      if (c.type === 'channel' && c.ownerId !== ctx.userId) return;
+      if (c.type === 'channel' && c.ownerId !== ctx.userId) return; // Только админ пишет в канал
 
       const text = String(msg.text || '').slice(0, 4000).trim();
-      if (!text) return;
-      const entry = { id: crypto.randomBytes(8).toString('hex'), userId: ctx.userId, text, ts: Date.now() };
+      const media = msg.media || null;
+      const poll = msg.poll || null;
+
+      if (!text && !media && !poll) return;
+
+      const entry = { 
+        id: crypto.randomBytes(8).toString('hex'), 
+        userId: ctx.userId, 
+        text, ts: Date.now(),
+        media: media, poll: poll, reactions: {}
+      };
+      
       messages.get(c.id).push(entry);
-      if (messages.get(c.id).length > 1000) messages.get(c.id).shift();
+      if (messages.get(c.id).length > 100) messages.get(c.id).shift(); // Чистим память от старых
       const u = users.get(ctx.userId);
       
       broadcastToChat(c.id, { type: 'message', chatId: c.id, message: entry, user: publicUser(u) });
       return;
     }
 
-    // --- Звонки (только для DM) ---
+    if (msg.type === 'react') {
+      const c = chats.get(ctx.chatId);
+      if (!c || !c.members.has(ctx.userId)) return;
+      const msgObj = messages.get(c.id).find(m => m.id === msg.msgId);
+      if (!msgObj) return;
+
+      msgObj.reactions = msgObj.reactions || {};
+      const emoji = msg.emoji;
+      if (!msgObj.reactions[emoji]) msgObj.reactions[emoji] = [];
+      
+      const idx = msgObj.reactions[emoji].indexOf(ctx.userId);
+      if (idx >= 0) msgObj.reactions[emoji].splice(idx, 1);
+      else msgObj.reactions[emoji].push(ctx.userId);
+      
+      if (msgObj.reactions[emoji].length === 0) delete msgObj.reactions[emoji];
+
+      broadcastToChat(c.id, { type: 'update_msg', chatId: c.id, message: msgObj });
+      return;
+    }
+
+    if (msg.type === 'vote') {
+      const c = chats.get(ctx.chatId);
+      if (!c || !c.members.has(ctx.userId)) return;
+      const msgObj = messages.get(c.id).find(m => m.id === msg.msgId);
+      if (!msgObj || !msgObj.poll) return;
+
+      if (!msgObj.poll.votes) msgObj.poll.votes = {};
+      msgObj.poll.votes[ctx.userId] = msg.optionIndex;
+
+      broadcastToChat(c.id, { type: 'update_msg', chatId: c.id, message: msgObj });
+      return;
+    }
+
+    // --- Звонки ---
     if (msg.type === 'call_offer') {
       const { chatId, toUserId, callType, sdp } = msg;
       const c = chats.get(chatId);
