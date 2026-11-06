@@ -49,16 +49,37 @@
     font-size: 48px; font-weight: 700; color: #fff;
     margin-bottom: 20px; box-shadow: 0 10px 40px rgba(82,136,193,.35);
   }
-  #login h1 { font-size: 26px; font-weight: 600; margin-bottom: 24px; }
+  #login h1 { font-size: 26px; font-weight: 600; margin-bottom: 8px; }
+  #login .sub { color: var(--text-dim); font-size: 14px; margin-bottom: 28px; text-align: center; max-width: 320px; }
+
   .auth-card {
     width: 100%; max-width: 380px; background: var(--bg);
     border: 1px solid var(--border); border-radius: 16px;
     padding: 24px; box-shadow: 0 20px 60px var(--card-shadow);
+    display: flex; flex-direction: column; gap: 12px;
+    align-items: center;
   }
-  .auth-step { display: none; }
-  .auth-step.active { display: block; }
-  .auth-step-title { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
-  .auth-step-sub { font-size: 13px; color: var(--text-dim); margin-bottom: 18px; }
+
+  .login-error {
+    color: var(--danger); font-size: 13px;
+    text-align: center; margin-top: 12px; min-height: 18px;
+  }
+  .login-hint {
+    color: var(--text-dim); font-size: 12px;
+    text-align: center; margin-top: 16px; line-height: 1.5;
+  }
+
+  #onboarding {
+    flex-direction: column; align-items: center; justify-content: center;
+    padding: 24px; background: var(--bg-login); overflow-y: auto;
+  }
+  .onb-card {
+    width: 100%; max-width: 420px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 16px;
+    padding: 32px 28px; box-shadow: 0 20px 60px var(--card-shadow);
+  }
+  .onb-card h2 { font-size: 22px; font-weight: 600; margin-bottom: 6px; text-align: center; }
+  .onb-card .sub { color: var(--text-dim); font-size: 14px; text-align: center; margin-bottom: 28px; }
 
   .field { margin-bottom: 14px; }
   .field label {
@@ -85,13 +106,6 @@
     font-size: 15px; pointer-events: none;
   }
   .username-prefix input { padding-left: 30px; }
-  .code-input {
-    font-size: 28px !important;
-    text-align: center;
-    letter-spacing: 12px;
-    font-family: 'SF Mono', Menlo, monospace !important;
-    padding: 14px !important;
-  }
 
   .btn-primary {
     width: 100%; background: var(--accent); color: #fff;
@@ -102,36 +116,10 @@
   .btn-primary:hover { background: var(--accent-hover); }
   .btn-primary:active { transform: scale(.98); }
   .btn-primary:disabled { opacity: .6; cursor: not-allowed; }
-  .btn-link {
-    width: 100%; background: transparent; color: var(--accent);
-    border: none; border-radius: 10px; padding: 10px;
-    font-size: 14px; cursor: pointer; margin-top: 4px;
-  }
-  .btn-link:hover { background: var(--hover); }
-  .btn-link:disabled { opacity: .5; cursor: not-allowed; }
   .auth-error {
     color: var(--danger); font-size: 13px;
     text-align: center; margin-top: 12px; min-height: 18px;
   }
-  .auth-info {
-    color: var(--text-dim); font-size: 13px;
-    text-align: center; margin-top: 10px;
-  }
-  .email-shown {
-    color: var(--accent); font-weight: 500;
-  }
-
-  #onboarding {
-    flex-direction: column; align-items: center; justify-content: center;
-    padding: 24px; background: var(--bg-login); overflow-y: auto;
-  }
-  .onb-card {
-    width: 100%; max-width: 420px; background: var(--bg);
-    border: 1px solid var(--border); border-radius: 16px;
-    padding: 32px 28px; box-shadow: 0 20px 60px var(--card-shadow);
-  }
-  .onb-card h2 { font-size: 22px; font-weight: 600; margin-bottom: 6px; text-align: center; }
-  .onb-card .sub { color: var(--text-dim); font-size: 14px; text-align: center; margin-bottom: 28px; }
   .char-count { text-align: right; font-size: 12px; color: var(--text-dim); margin-top: 4px; }
 
   #app { flex-direction: column; }
@@ -182,6 +170,7 @@
     display: flex; align-items: center; justify-content: center;
     font-size: 22px; font-weight: 600; color: #fff;
     flex-shrink: 0; position: relative;
+    background-size: cover; background-position: center;
   }
   .avatar svg { display: block; }
   .chat-info { flex: 1; min-width: 0; }
@@ -345,6 +334,7 @@
     display: flex; align-items: center; justify-content: center;
     font-size: 40px; font-weight: 600; color: #fff; margin-bottom: 16px;
     box-shadow: 0 8px 30px rgba(82,136,193,.35);
+    background-size: cover; background-position: center;
   }
   .profile-name { font-size: 22px; font-weight: 600; margin-bottom: 4px; }
   .profile-username { font-size: 15px; color: var(--accent); margin-bottom: 16px; }
@@ -417,6 +407,7 @@
     display: flex; align-items: center; justify-content: center;
     font-size: 56px; font-weight: 600;
     box-shadow: 0 12px 60px rgba(82,136,193,.4);
+    background-size: cover; background-position: center;
   }
   .call-name { font-size: 24px; font-weight: 600; }
   .call-status { font-size: 15px; color: rgba(255,255,255,.65); }
@@ -467,6 +458,7 @@
     display: flex; align-items: center; justify-content: center;
     font-size: 40px; font-weight: 600; color: #fff;
     animation: pulse 1.5s infinite;
+    background-size: cover; background-position: center;
   }
   @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.06); } }
   .incoming-name { font-size: 20px; font-weight: 600; color: #fff; }
@@ -498,6 +490,7 @@
     width: 40px; height: 40px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
     font-size: 17px; font-weight: 600; color: #fff; flex-shrink: 0;
+    background-size: cover; background-position: center;
   }
   .toast-body { flex: 1; min-width: 0; }
   .toast-title {
@@ -529,6 +522,7 @@
     #toastContainer { top: 8px; right: 8px; left: 8px; width: auto; }
   }
 </style>
+<script async src="https://telegram.org/js/telegram-widget.js?22"></script>
 </head>
 <body data-theme="dark">
 
@@ -538,34 +532,13 @@
 <div id="login" class="screen active">
   <div class="logo">З</div>
   <h1>ЗахаркаГрам</h1>
+  <div class="sub">Быстрый и безопасный мессенджер</div>
   <div class="auth-card">
-
-    <!-- Шаг 1: email -->
-    <div class="auth-step active" id="stepEmail">
-      <div class="auth-step-title">Вход в аккаунт</div>
-      <div class="auth-step-sub">Введи email — пришлём 6-значный код</div>
-      <div class="field">
-        <label>Email</label>
-        <input type="email" id="authEmail" placeholder="you@example.com" autocomplete="email">
-      </div>
-      <button class="btn-primary" id="sendCodeBtn">Получить код</button>
-      <div class="auth-error" id="emailError"></div>
+    <div id="tgWidgetSlot"></div>
+    <div class="login-error" id="loginError"></div>
+    <div class="login-hint">
+      Вход через Telegram — безопасно и без пароля.
     </div>
-
-    <!-- Шаг 2: код -->
-    <div class="auth-step" id="stepCode">
-      <div class="auth-step-title">Введи код</div>
-      <div class="auth-step-sub">Код отправлен на <span class="email-shown" id="codeEmailShow">—</span></div>
-      <div class="field">
-        <input type="text" id="authCode" class="code-input" placeholder="000000" maxlength="6" inputmode="numeric" autocomplete="one-time-code">
-      </div>
-      <button class="btn-primary" id="verifyBtn">Войти</button>
-      <button class="btn-link" id="resendBtn">Отправить код ещё раз</button>
-      <button class="btn-link" id="backToEmailBtn">← Изменить email</button>
-      <div class="auth-error" id="codeError"></div>
-      <div class="auth-info" id="codeInfo"></div>
-    </div>
-
   </div>
 </div>
 
@@ -774,7 +747,6 @@ const state = {
   me: null, token: null, chats: [], users: [],
   activeChatId: null, currentTab: 'chats', ws: null,
   unread: {},
-  pendingEmail: null,
 };
 
 let theme = localStorage.getItem('zkg_theme') || 'dark';
@@ -915,59 +887,36 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
-// ==== ЛОГИН: шаг 1 — email ====
-function showLoginStep(step) {
-  $('stepEmail').classList.toggle('active', step === 'email');
-  $('stepCode').classList.toggle('active', step === 'code');
-  $('emailError').textContent = '';
-  $('codeError').textContent = '';
+// ==== TELEGRAM LOGIN ====
+const TG_BOT_USERNAME = 'zahar_kagram_bot'; // ← ЗАМЕНИ НА СВОЕГО БОТА (без @)
+
+function initTelegramWidget() {
+  const slot = document.getElementById('tgWidgetSlot');
+  if (!slot) return;
+  slot.innerHTML = '';
+  const script = document.createElement('script');
+  script.async = true;
+  script.src = 'https://telegram.org/js/telegram-widget.js?22';
+  script.setAttribute('data-telegram-login', TG_BOT_USERNAME);
+  script.setAttribute('data-size', 'large');
+  script.setAttribute('data-radius', '10');
+  script.setAttribute('data-userpic', 'false');
+  script.setAttribute('data-request-access', 'write');
+  script.setAttribute('data-onauth', 'onTelegramAuth(user)');
+  slot.appendChild(script);
 }
 
-$('sendCodeBtn').addEventListener('click', async () => {
-  const email = $('authEmail').value.trim();
-  $('emailError').textContent = '';
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    $('emailError').textContent = 'Неверный формат email';
-    return;
-  }
-
-  const btn = $('sendCodeBtn'); btn.disabled = true;
+async function onTelegramAuth(user) {
+  const errEl = document.getElementById('loginError');
+  errEl.textContent = '';
   try {
-    await api('/api/auth/send-code', { method: 'POST', body: JSON.stringify({ email }) });
-    state.pendingEmail = email;
-    $('codeEmailShow').textContent = email;
-    $('authCode').value = '';
-    showLoginStep('code');
-    $('codeInfo').textContent = 'Проверь почту. Код действует 10 минут.';
-    setTimeout(() => $('authCode').focus(), 100);
-  } catch (e) {
-    $('emailError').textContent = e.message;
-  } finally { btn.disabled = false; }
-});
-
-$('authEmail').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); $('sendCodeBtn').click(); }
-});
-
-// ==== ЛОГИН: шаг 2 — код ====
-$('verifyBtn').addEventListener('click', async () => {
-  const code = $('authCode').value.trim();
-  const email = state.pendingEmail;
-  $('codeError').textContent = '';
-
-  if (!email) { showLoginStep('email'); return; }
-  if (!/^\d{6}$/.test(code)) { $('codeError').textContent = 'Введи 6 цифр'; return; }
-
-  const btn = $('verifyBtn'); btn.disabled = true;
-  try {
-    const data = await api('/api/auth/verify-code', {
+    const data = await api('/api/auth/telegram', {
       method: 'POST',
-      body: JSON.stringify({ email, code }),
+      body: JSON.stringify(user),
     });
     state.token = data.token;
     state.me = data.user;
     localStorage.setItem('zkg_token', data.token);
-    state.pendingEmail = null;
 
     if (data.isNewUser || !data.user.username) {
       $('login').classList.remove('active');
@@ -978,46 +927,13 @@ $('verifyBtn').addEventListener('click', async () => {
       await bootApp();
     }
   } catch (e) {
-    $('codeError').textContent = e.message;
-  } finally { btn.disabled = false; }
-});
-
-$('authCode').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); $('verifyBtn').click(); }
-});
-
-$('authCode').addEventListener('input', (e) => {
-  e.target.value = e.target.value.replace(/\D/g, '').slice(0, 6);
-});
-
-$('resendBtn').addEventListener('click', async () => {
-  const email = state.pendingEmail;
-  if (!email) return;
-  const btn = $('resendBtn'); btn.disabled = true;
-  $('codeError').textContent = '';
-  try {
-    await api('/api/auth/send-code', { method: 'POST', body: JSON.stringify({ email }) });
-    $('codeInfo').textContent = 'Код отправлен повторно';
-    $('authCode').value = '';
-    setTimeout(() => { btn.disabled = false; }, 30000);
-    let left = 30;
-    const iv = setInterval(() => {
-      left--;
-      if (left <= 0) { clearInterval(iv); btn.textContent = 'Отправить код ещё раз'; return; }
-      btn.textContent = `Отправить через ${left}с`;
-    }, 1000);
-    btn.textContent = `Отправить через 30с`;
-  } catch (e) {
-    $('codeError').textContent = e.message;
-    btn.disabled = false;
+    errEl.textContent = e.message || 'Ошибка входа';
   }
-});
+}
 
-$('backToEmailBtn').addEventListener('click', () => {
-  state.pendingEmail = null;
-  showLoginStep('email');
-  setTimeout(() => $('authEmail').focus(), 100);
-});
+window.onTelegramAuth = onTelegramAuth;
+
+initTelegramWidget();
 
 // ==== ОНБОРДИНГ ====
 $('onbUsername').addEventListener('input', () => {
