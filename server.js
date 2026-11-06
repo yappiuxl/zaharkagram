@@ -11,18 +11,13 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
 const users = new Map();
 const sessions = new Map();
-const telegramIds = new Map();  // telegramId -> userId
+const telegramIds = new Map();
 const usernames = new Map();
-const chats = new Map();
-const messages = new Map();
-
-const GLOBAL_CHAT = 'global';
-chats.set(GLOBAL_CHAT, { id: GLOBAL_CHAT, name: 'Общий чат', members: new Set() });
-messages.set(GLOBAL_CHAT, []);
+const chats = new Map();      // chatId -> { id, type, name, ownerId, members: Set, isPublic }
+const messages = new Map();   // chatId -> [{ id, userId, text, ts }]
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
-
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -30,7 +25,6 @@ app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
-
 app.use(express.static(__dirname, { extensions: ['html'] }));
 
 const USERNAME_RE = /^[a-zA-Z][a-zA-Z0-9_]{4,31}$/;
@@ -38,7 +32,6 @@ const USERNAME_RE = /^[a-zA-Z][a-zA-Z0-9_]{4,31}$/;
 function publicUser(u) {
   return { id: u.id, username: u.username, name: u.name, bio: u.bio, color: u.color, avatarUrl: u.avatarUrl || null };
 }
-
 function authMiddleware(req, res, next) {
   const token = (req.headers.authorization || '').replace('Bearer ', '');
   const userId = token && sessions.get(token);
@@ -47,31 +40,19 @@ function authMiddleware(req, res, next) {
   next();
 }
 
-// ---------- Вход через Telegram ----------
+// ---------- Telegram ----------
 app.post('/api/auth/telegram', (req, res) => {
   if (!TELEGRAM_BOT_TOKEN) return res.status(500).json({ error: 'telegram not configured' });
-
   const data = req.body || {};
   if (!data.id || !data.hash) return res.status(400).json({ error: 'bad data' });
 
   const { hash, ...fields } = data;
-
-  // Проверка подписи Telegram (HMAC-SHA256)
-  const dataCheckString = Object.keys(fields)
-    .sort()
-    .map(k => `${k}=${fields[k]}`)
-    .join('\n');
-
+  const dataCheckString = Object.keys(fields).sort().map(k => `${k}=${fields[k]}`).join('\n');
   const secretKey = crypto.createHash('sha256').update(TELEGRAM_BOT_TOKEN).digest();
   const hmac = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
 
   if (hmac !== hash) return res.status(401).json({ error: 'invalid signature' });
-
-  // Данные не старше 24 часов
-  const authDate = Number(fields.auth_date) * 1000;
-  if (!authDate || Date.now() - authDate > 24 * 3600 * 1000) {
-    return res.status(401).json({ error: 'auth expired' });
-  }
+  if (Date.now() - Number(fields.auth_date) * 1000 > 24 * 3600 * 1000) return res.status(401).json({ error: 'auth expired' });
 
   const telegramId = 'tg_' + fields.id;
   let userId = telegramIds.get(telegramId);
@@ -80,67 +61,92 @@ app.post('/api/auth/telegram', (req, res) => {
   if (!userId) {
     isNewUser = true;
     userId = 'u_' + crypto.randomBytes(8).toString('hex');
-    const user = {
-      id: userId,
-      telegramId: String(fields.id),
-      telegramUsername: fields.username || null,
-      username: null,
-      name: [fields.first_name, fields.last_name].filter(Boolean).join(' ') || fields.username || 'User',
-      bio: '',
-      color: '#5288c1',
-      avatarUrl: fields.photo_url || null,
-    };
-    users.set(userId, user);
+    users.set(userId, {
+      id: userId, telegramId: String(fields.id), telegramUsername: fields.username || null,
+      username: null, name: [fields.first_name, fields.last_name].filter(Boolean).join(' ') || fields.username || 'User',
+      bio: '', color: '#5288c1', avatarUrl: fields.photo_url || null,
+    });
     telegramIds.set(telegramId, userId);
-  } else {
-    const user = users.get(userId);
-    if (fields.photo_url) user.avatarUrl = fields.photo_url;
   }
 
   const token = crypto.randomBytes(24).toString('hex');
   sessions.set(token, userId);
-
-  const user = users.get(userId);
-  res.json({
-    token,
-    user: publicUser(user),
-    isNewUser: isNewUser || !user.username,
-  });
+  res.json({ token, user: publicUser(users.get(userId)), isNewUser: isNewUser || !users.get(userId).username });
 });
 
-// ---------- Профиль ----------
-app.get('/api/me', authMiddleware, (req, res) => {
-  res.json({ user: publicUser(users.get(req.userId)) });
-});
+// ---------- Profile ----------
+app.get('/api/me', authMiddleware, (req, res) => res.json({ user: publicUser(users.get(req.userId)) }));
 
 app.post('/api/profile', authMiddleware, (req, res) => {
   const { username, name, bio } = req.body || {};
-  if (typeof name !== 'string' || name.trim().length < 2) {
-    return res.status(400).json({ error: 'bad name' });
-  }
-  if (bio != null && typeof bio !== 'string') return res.status(400).json({ error: 'bad bio' });
+  if (typeof name !== 'string' || name.trim().length < 2) return res.status(400).json({ error: 'bad name' });
   if ((bio || '').length > 120) return res.status(400).json({ error: 'bio too long' });
 
   const user = users.get(req.userId);
-  if (!user) return res.status(404).json({ error: 'no user' });
-
   if (!user.username) {
-    if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
-      return res.status(400).json({ error: 'bad username' });
-    }
+    if (!USERNAME_RE.test(username)) return res.status(400).json({ error: 'bad username' });
     const lower = username.toLowerCase();
     if (usernames.has(lower)) return res.status(409).json({ error: 'username taken' });
     user.username = username;
     usernames.set(lower, user.id);
   }
-
   user.name = name.trim();
   user.bio = (bio || '').trim();
-
-  const g = chats.get(GLOBAL_CHAT);
-  if (!g.members.has(user.id)) g.members.add(user.id);
-
   res.json({ user: publicUser(user) });
+});
+
+// ---------- Группы и каналы ----------
+app.post('/api/chat/create', authMiddleware, (req, res) => {
+  const { type, name, isPublic } = req.body || {};
+  if (!['group', 'channel'].includes(type)) return res.status(400).json({ error: 'bad type' });
+  if (!name || name.trim().length < 2) return res.status(400).json({ error: 'bad name' });
+
+  const chatId = (type === 'group' ? 'g_' : 'c_') + crypto.randomBytes(6).toString('hex');
+  const members = new Set([req.userId]);
+  
+  if (type === 'channel') members.add(req.userId); // админ канала
+
+  chats.set(chatId, {
+    id: chatId,
+    type,
+    name: name.trim(),
+    ownerId: req.userId,
+    members,
+    isPublic: isPublic !== false,
+    createdAt: Date.now()
+  });
+  messages.set(chatId, []);
+
+  res.json({ chat: { id: chatId, type, name: name.trim(), isPublic, ownerId: req.userId } });
+});
+
+app.post('/api/chat/join', authMiddleware, (req, res) => {
+  const { chatId } = req.body || {};
+  const chat = chats.get(chatId);
+  if (!chat) return res.status(404).json({ error: 'chat not found' });
+  if (!chat.isPublic) return res.status(403).json({ error: 'private chat' });
+
+  chat.members.add(req.userId);
+  res.json({ ok: true });
+});
+
+app.post('/api/chat/invite', authMiddleware, (req, res) => {
+  const { chatId, userId } = req.body || {};
+  const chat = chats.get(chatId);
+  if (!chat || chat.type !== 'group') return res.status(404).json({ error: 'group not found' });
+  if (!chat.members.has(req.userId)) return res.status(403).json({ error: 'not in group' });
+  
+  const target = users.get(userId);
+  if (!target) return res.status(404).json({ error: 'user not found' });
+
+  chat.members.add(userId);
+  
+  // Системное сообщение о входе
+  const entry = { id: crypto.randomBytes(8).toString('hex'), userId: 'system', text: `👤 ${target.name} присоединился к группе`, ts: Date.now(), isSystem: true };
+  messages.get(chatId).push(entry);
+  broadcastToChat(chatId, { type: 'message', chatId, message: entry, user: { name: 'Система' } });
+
+  res.json({ ok: true });
 });
 
 // ---------- Чаты ----------
@@ -149,23 +155,21 @@ app.get('/api/chats', authMiddleware, (req, res) => {
   for (const c of chats.values()) {
     if (!c.members.has(req.userId)) continue;
     const last = messages.get(c.id).slice(-1)[0] || null;
-    let name = c.name || null;
+    
+    // Для личных переписок подтягиваем инфу о собеседнике
     let memberInfo = null;
-
-    if (c.isDM) {
+    let name = c.name;
+    if (c.type === 'dm') {
       for (const mid of c.members) {
         if (mid !== req.userId) {
           const other = users.get(mid);
-          if (other) {
-            memberInfo = publicUser(other);
-            name = other.name || other.username;
-          }
+          if (other) { memberInfo = publicUser(other); name = other.name || other.username; }
         }
       }
     }
-
-    list.push({ id: c.id, name, nameKey: c.nameKey || null, isDM: !!c.isDM, memberInfo, last });
+    list.push({ id: c.id, type: c.type, name, memberInfo, last, isPublic: c.isPublic, ownerId: c.ownerId });
   }
+  list.sort((a, b) => (b.last?.ts || 0) - (a.last?.ts || 0));
   res.json({ chats: list });
 });
 
@@ -173,40 +177,46 @@ app.get('/api/chats/:id/messages', authMiddleware, (req, res) => {
   const c = chats.get(req.params.id);
   if (!c || !c.members.has(req.userId)) return res.status(403).json({ error: 'forbidden' });
   const raw = messages.get(c.id) || [];
-  res.json({
-    messages: raw.map(m => {
-      const u = users.get(m.userId);
-      return { id: m.id, userId: m.userId, text: m.text, ts: m.ts, user: u ? publicUser(u) : null };
-    }),
-  });
+  res.json({ messages: raw.map(m => {
+    const u = users.get(m.userId);
+    return { id: m.id, userId: m.userId, text: m.text, ts: m.ts, user: u ? publicUser(u) : { name: 'Система' }, isSystem: m.isSystem };
+  })});
 });
 
-app.get('/api/users', authMiddleware, (req, res) => {
+// ---------- Поиск ----------
+app.get('/api/search', authMiddleware, (req, res) => {
   const q = String(req.query.q || '').toLowerCase().trim();
-  const out = [];
+  const foundUsers = [];
+  const foundChats = [];
+
   for (const u of users.values()) {
-    if (u.id === req.userId) continue;
-    if (!u.username || !u.name) continue;
+    if (u.id === req.userId || !u.username || !u.name) continue;
     if (q && !u.username.toLowerCase().includes(q) && !u.name.toLowerCase().includes(q)) continue;
-    out.push(publicUser(u));
-    if (out.length >= 30) break;
+    foundUsers.push(publicUser(u));
+    if (foundUsers.length >= 15) break;
   }
-  res.json({ users: out });
+
+  for (const c of chats.values()) {
+    if (c.type === 'dm' || !c.isPublic) continue;
+    if (q && !c.name.toLowerCase().includes(q)) continue;
+    foundChats.push({ id: c.id, type: c.type, name: c.name, membersCount: c.members.size });
+    if (foundChats.length >= 15) break;
+  }
+
+  res.json({ users: foundUsers, chats: foundChats });
 });
 
 app.post('/api/dialog', authMiddleware, (req, res) => {
   const otherId = req.body && req.body.userId;
-  if (!otherId || !users.has(otherId)) return res.status(400).json({ error: 'no user' });
-  if (otherId === req.userId) return res.status(400).json({ error: 'self dialog' });
-
+  if (!otherId || !users.has(otherId) || otherId === req.userId) return res.status(400).json({ error: 'bad' });
   const ids = [req.userId, otherId].sort();
   const chatId = 'dm_' + ids[0] + '_' + ids[1];
   if (!chats.has(chatId)) {
-    chats.set(chatId, { id: chatId, members: new Set([req.userId, otherId]), isDM: true });
+    chats.set(chatId, { id: chatId, type: 'dm', members: new Set([req.userId, otherId]) });
     messages.set(chatId, []);
   }
   const other = users.get(otherId);
-  res.json({ chat: { id: chatId, isDM: true, memberInfo: publicUser(other) } });
+  res.json({ chat: { id: chatId, type: 'dm', memberInfo: publicUser(other) } });
 });
 
 // ---------- WS ----------
@@ -214,17 +224,13 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 const clients = new Map();
 
-function send(ws, packet) { if (ws.readyState === 1) ws.send(JSON.stringify(packet)); }
-function sendToUser(userId, packet) {
-  for (const [ws, ctx] of clients) {
-    if (ctx.userId === userId && ws.readyState === 1) ws.send(JSON.stringify(packet));
-  }
+function send(ws, p) { if (ws.readyState === 1) ws.send(JSON.stringify(p)); }
+function sendToUser(userId, p) {
+  for (const [ws, ctx] of clients) if (ctx.userId === userId && ws.readyState === 1) ws.send(JSON.stringify(p));
 }
-function broadcastToChat(chatId, packet) {
-  const data = JSON.stringify(packet);
-  for (const [ws, ctx] of clients) {
-    if (ctx.chatId === chatId && ws.readyState === 1) ws.send(data);
-  }
+function broadcastToChat(chatId, p) {
+  const data = JSON.stringify(p);
+  for (const [ws, ctx] of clients) if (ctx.chatId === chatId && ws.readyState === 1) ws.send(data);
 }
 
 const activeCalls = new Map();
@@ -239,10 +245,8 @@ wss.on('connection', (ws) => {
     if (msg.type === 'auth') {
       const userId = sessions.get(msg.token);
       if (!userId) { ws.close(4001, 'unauthorized'); return; }
-      const chatId = msg.chatId && chats.has(msg.chatId) && chats.get(msg.chatId).members.has(userId)
-        ? msg.chatId : GLOBAL_CHAT;
-      clients.set(ws, { userId, chatId });
-      send(ws, { type: 'authed', userId, chatId });
+      clients.set(ws, { userId, chatId: msg.chatId || null });
+      send(ws, { type: 'authed', userId });
       return;
     }
 
@@ -261,24 +265,30 @@ wss.on('connection', (ws) => {
     if (msg.type === 'message') {
       const c = chats.get(ctx.chatId);
       if (!c || !c.members.has(ctx.userId)) return;
+      
+      // Права: в канале писать могут только ownerId
+      if (c.type === 'channel' && c.ownerId !== ctx.userId) return;
+
       const text = String(msg.text || '').slice(0, 4000).trim();
       if (!text) return;
       const entry = { id: crypto.randomBytes(8).toString('hex'), userId: ctx.userId, text, ts: Date.now() };
       messages.get(c.id).push(entry);
       if (messages.get(c.id).length > 1000) messages.get(c.id).shift();
       const u = users.get(ctx.userId);
+      
       broadcastToChat(c.id, { type: 'message', chatId: c.id, message: entry, user: publicUser(u) });
       return;
     }
 
+    // --- Звонки (только для DM) ---
     if (msg.type === 'call_offer') {
       const { chatId, toUserId, callType, sdp } = msg;
       const c = chats.get(chatId);
-      if (!c || !c.members.has(ctx.userId)) return;
+      if (!c || !c.members.has(ctx.userId) || c.type !== 'dm') return;
       const callId = crypto.randomBytes(8).toString('hex');
-      activeCalls.set(callId, { fromUserId: ctx.userId, toUserId, chatId, type: callType === 'video' ? 'video' : 'audio' });
+      activeCalls.set(callId, { fromUserId: ctx.userId, toUserId, chatId, type: callType });
       const u = users.get(ctx.userId);
-      sendToUser(toUserId, { type: 'call_incoming', callId, chatId, fromUser: publicUser(u), callType: activeCalls.get(callId).type, sdp });
+      sendToUser(toUserId, { type: 'call_incoming', callId, chatId, fromUser: publicUser(u), callType, sdp });
       send(ws, { type: 'call_ringing', callId });
       return;
     }
@@ -305,20 +315,7 @@ wss.on('connection', (ws) => {
       return;
     }
   });
-
-  ws.on('close', () => {
-    const ctx = clients.get(ws);
-    clients.delete(ws);
-    if (ctx) {
-      for (const [callId, call] of activeCalls) {
-        if (call.fromUserId === ctx.userId || call.toUserId === ctx.userId) {
-          const other = call.fromUserId === ctx.userId ? call.toUserId : call.fromUserId;
-          sendToUser(other, { type: 'call_ended', callId, reason: 'disconnect' });
-          activeCalls.delete(callId);
-        }
-      }
-    }
-  });
+  ws.on('close', () => clients.delete(ws));
 });
 
 setInterval(() => {
@@ -329,7 +326,4 @@ setInterval(() => {
   }
 }, 30000);
 
-server.listen(PORT, () => {
-  console.log(`ЗахаркаГрам server on :${PORT}`);
-  console.log(`Telegram auth: ${TELEGRAM_BOT_TOKEN ? 'configured' : 'NOT configured'}`);
-});
+server.listen(PORT, () => console.log(`ЗахаркаГрам server on :${PORT}`));
