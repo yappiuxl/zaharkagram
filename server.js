@@ -4,43 +4,21 @@ import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
-import nodemailer from 'nodemailer';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
-// ---------- SMTP (опционально) ----------
-let transporter = null;
-if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-  transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT || 465),
-    secure: Number(process.env.SMTP_PORT || 465) === 465,
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-  });
-  console.log('SMTP configured:', process.env.SMTP_HOST);
-} else {
-  console.log('SMTP not configured — коды будут в логах сервера');
-}
-
-// ---------- хранилище ----------
-const users = new Map();       // userId -> { id, email, username, name, bio, color }
-const sessions = new Map();    // token -> userId
-const emails = new Map();      // email.toLowerCase() -> userId
-const usernames = new Map();   // username.toLowerCase() -> userId
+const users = new Map();
+const sessions = new Map();
+const telegramIds = new Map();  // telegramId -> userId
+const usernames = new Map();
 const chats = new Map();
 const messages = new Map();
-const otpCodes = new Map();    // email -> { code, expiresAt, attempts }
 
 const GLOBAL_CHAT = 'global';
 chats.set(GLOBAL_CHAT, { id: GLOBAL_CHAT, name: 'Общий чат', members: new Set() });
 messages.set(GLOBAL_CHAT, []);
-
-const OTP_TTL_MS = 10 * 60 * 1000; // 10 минут
-const OTP_MAX_ATTEMPTS = 5;
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
@@ -55,11 +33,10 @@ app.use((req, res, next) => {
 
 app.use(express.static(__dirname, { extensions: ['html'] }));
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USERNAME_RE = /^[a-zA-Z][a-zA-Z0-9_]{4,31}$/;
 
 function publicUser(u) {
-  return { id: u.id, username: u.username, name: u.name, bio: u.bio, color: u.color };
+  return { id: u.id, username: u.username, name: u.name, bio: u.bio, color: u.color, avatarUrl: u.avatarUrl || null };
 }
 
 function authMiddleware(req, res, next) {
@@ -70,90 +47,34 @@ function authMiddleware(req, res, next) {
   next();
 }
 
-// ---------- отправить код на email ----------
-app.post('/api/auth/send-code', async (req, res) => {
-  const email = (req.body && req.body.email || '').trim();
-  if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'bad email' });
+// ---------- Вход через Telegram ----------
+app.post('/api/auth/telegram', (req, res) => {
+  if (!TELEGRAM_BOT_TOKEN) return res.status(500).json({ error: 'telegram not configured' });
 
-  const lower = email.toLowerCase();
+  const data = req.body || {};
+  if (!data.id || !data.hash) return res.status(400).json({ error: 'bad data' });
 
-  // rate limit: не чаще раза в 60 секунд
-  const existing = otpCodes.get(lower);
-  if (existing && existing.createdAt && Date.now() - existing.createdAt < 60_000) {
-    const wait = Math.ceil((60_000 - (Date.now() - existing.createdAt)) / 1000);
-    return res.status(429).json({ error: `Подожди ${wait} сек перед повторной отправкой` });
+  const { hash, ...fields } = data;
+
+  // Проверка подписи Telegram (HMAC-SHA256)
+  const dataCheckString = Object.keys(fields)
+    .sort()
+    .map(k => `${k}=${fields[k]}`)
+    .join('\n');
+
+  const secretKey = crypto.createHash('sha256').update(TELEGRAM_BOT_TOKEN).digest();
+  const hmac = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+
+  if (hmac !== hash) return res.status(401).json({ error: 'invalid signature' });
+
+  // Данные не старше 24 часов
+  const authDate = Number(fields.auth_date) * 1000;
+  if (!authDate || Date.now() - authDate > 24 * 3600 * 1000) {
+    return res.status(401).json({ error: 'auth expired' });
   }
 
-  const code = String(crypto.randomInt(100000, 1000000)); // 6 цифр
-  otpCodes.set(lower, {
-    code,
-    expiresAt: Date.now() + OTP_TTL_MS,
-    createdAt: Date.now(),
-    attempts: 0,
-  });
-
-  // Всегда логируем в сервер (видно в Render Logs)
-  console.log(`\n[OTP] email=${email} code=${code}\n`);
-
-  // Пытаемся отправить если SMTP настроен
-  if (transporter) {
-    try {
-      await transporter.sendMail({
-        from: process.env.SMTP_FROM || process.env.SMTP_USER,
-        to: email,
-        subject: 'ЗахаркаГрам — код входа',
-        text: `Твой код входа: ${code}\n\nКод действует 10 минут. Если ты не запрашивал — проигнорируй это письмо.`,
-        html: `
-          <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:24px;background:#17212b;color:#fff;border-radius:12px">
-            <h2 style="color:#5288c1;margin:0 0 16px">ЗахаркаГрам</h2>
-            <p style="font-size:15px;color:#c9d1d9">Твой код входа:</p>
-            <div style="font-size:36px;font-weight:700;letter-spacing:8px;text-align:center;padding:16px;background:#0e1621;border-radius:8px;margin:16px 0;color:#fff">${code}</div>
-            <p style="font-size:13px;color:#708499">Код действует 10 минут. Если ты не запрашивал вход — проигнорируй письмо.</p>
-          </div>
-        `,
-      });
-      console.log(`[OTP] email sent to ${email}`);
-    } catch (e) {
-      console.error('[OTP] smtp error:', e.message);
-      return res.status(500).json({ error: 'Не удалось отправить письмо. Проверь настройки SMTP на сервере.' });
-    }
-  }
-
-  res.json({ ok: true, needsCode: true });
-});
-
-// ---------- проверить код и войти ----------
-app.post('/api/auth/verify-code', (req, res) => {
-  const email = (req.body && req.body.email || '').trim();
-  const code = String((req.body && req.body.code) || '').trim();
-
-  if (!EMAIL_RE.test(email) || !/^\d{6}$/.test(code)) {
-    return res.status(400).json({ error: 'bad request' });
-  }
-
-  const lower = email.toLowerCase();
-  const rec = otpCodes.get(lower);
-  if (!rec) return res.status(400).json({ error: 'Код не запрашивался или истёк' });
-  if (Date.now() > rec.expiresAt) {
-    otpCodes.delete(lower);
-    return res.status(400).json({ error: 'Код истёк, запроси новый' });
-  }
-
-  rec.attempts++;
-  if (rec.attempts > OTP_MAX_ATTEMPTS) {
-    otpCodes.delete(lower);
-    return res.status(429).json({ error: 'Слишком много попыток, запроси новый код' });
-  }
-
-  if (rec.code !== code) {
-    return res.status(401).json({ error: 'Неверный код' });
-  }
-
-  // код верный — удаляем
-  otpCodes.delete(lower);
-
-  // находим или создаём юзера
-  let userId = emails.get(lower);
+  const telegramId = 'tg_' + fields.id;
+  let userId = telegramIds.get(telegramId);
   let isNewUser = false;
 
   if (!userId) {
@@ -161,20 +82,25 @@ app.post('/api/auth/verify-code', (req, res) => {
     userId = 'u_' + crypto.randomBytes(8).toString('hex');
     const user = {
       id: userId,
-      email,
+      telegramId: String(fields.id),
+      telegramUsername: fields.username || null,
       username: null,
-      name: null,
+      name: [fields.first_name, fields.last_name].filter(Boolean).join(' ') || fields.username || 'User',
       bio: '',
       color: '#5288c1',
+      avatarUrl: fields.photo_url || null,
     };
     users.set(userId, user);
-    emails.set(lower, userId);
+    telegramIds.set(telegramId, userId);
+  } else {
+    const user = users.get(userId);
+    if (fields.photo_url) user.avatarUrl = fields.photo_url;
   }
 
-  const user = users.get(userId);
   const token = crypto.randomBytes(24).toString('hex');
   sessions.set(token, userId);
 
+  const user = users.get(userId);
   res.json({
     token,
     user: publicUser(user),
@@ -182,7 +108,7 @@ app.post('/api/auth/verify-code', (req, res) => {
   });
 });
 
-// ---------- профиль ----------
+// ---------- Профиль ----------
 app.get('/api/me', authMiddleware, (req, res) => {
   res.json({ user: publicUser(users.get(req.userId)) });
 });
@@ -217,7 +143,7 @@ app.post('/api/profile', authMiddleware, (req, res) => {
   res.json({ user: publicUser(user) });
 });
 
-// ---------- чаты ----------
+// ---------- Чаты ----------
 app.get('/api/chats', authMiddleware, (req, res) => {
   const list = [];
   for (const c of chats.values()) {
@@ -403,12 +329,7 @@ setInterval(() => {
   }
 }, 30000);
 
-// очистка истёкших кодов раз в 5 минут
-setInterval(() => {
-  const now = Date.now();
-  for (const [email, rec] of otpCodes) {
-    if (now > rec.expiresAt) otpCodes.delete(email);
-  }
-}, 5 * 60 * 1000);
-
-server.listen(PORT, () => console.log(`ЗахаркаГрам server on :${PORT}`));
+server.listen(PORT, () => {
+  console.log(`ЗахаркаГрам server on :${PORT}`);
+  console.log(`Telegram auth: ${TELEGRAM_BOT_TOKEN ? 'configured' : 'NOT configured'}`);
+});
